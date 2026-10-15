@@ -1,10 +1,9 @@
-M5 is clean. Here's the **HANDOFF**.
 
 ---
 
 # PROJECT_STATE.md
 
-_Last updated: Milestone 5 complete. v1 is feature-complete and QA-verified._
+_Last updated: Milestone 5 complete. v1 is feature-complete and QA-verified.
 
 ## What this is
 
