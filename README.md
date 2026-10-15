@@ -34,6 +34,12 @@ invariants, gotchas, and milestone history.
 - **No backend, no database, no auth.** All data lives in the browser under
   the `localStorage` key `questlog.v1`.
 
+## Status
+
+v1 — feature-complete, QA-verified, frontend-only. See `PROJECT_STATE.md` for
+invariants, gotchas, and milestone history.
+
+**Live:** https://questlog-by-edriane.vercel.app/
 ## Game rules
 XP per completion: easy 10, medium 25, hard 50.
 
