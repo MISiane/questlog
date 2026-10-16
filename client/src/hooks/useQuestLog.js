@@ -31,10 +31,6 @@ function isHabitScheduledOn(habit, dateStr) {
   return habit.schedule.includes(dayOfWeek(dateStr))
 }
 
-function xpForNextLevelAtLevel(level) {
-  return 100 * level
-}
-
 function completedDatesFor(habitId, events) {
   const set = new Set()
   for (const e of events) {
@@ -44,44 +40,74 @@ function completedDatesFor(habitId, events) {
 }
 
 // ---------------------------------------------------------------------------
-// walk() — the single HP/XP mapping from an event log.
+// walk() — the single source of truth for XP, HP, level, and faint count.
+//
+// Derives everything from the raw event log. Ignores saved `level_up` and
+// `faint` events entirely: those are inert historical markers written by an
+// earlier version of the app. Level is derived from XP via levelFromXp(),
+// which is the same function xp.js uses to render the XP bar. One source of
+// truth, no possibility of drift.
+//
+// Returns:
+//   xp            — total XP earned
+//   hp            — current HP (0..HP_MAX)
+//   level         — derived from xp, matches the XP bar
+//   faintCount    — how many times HP hit 0 during the walk
+//   levelsReached — every level the walk passed through, in order
+//                   (informational; the hook diffs `level`, not this array)
 // ---------------------------------------------------------------------------
 
 function walk(events) {
   const sorted = [...events].sort((a, b) => a.ts - b.ts)
+
   let xp = 0
   let hp = HP_MAX
-  let level = 1
-  const levelUpEvents = []
-  const faintEvents = []
+  let faintCount = 0
+  const levelsReached = []
+
+  // At the start, we're at level 1 with full HP. Record it so a fresh
+  // character doesn't spuriously count as reaching level 1.
+  let prevLevel = levelFromXp(xp)
 
   for (const e of sorted) {
     if (e.type === 'complete') xp += e.xp ?? 0
     else if (e.type === 'miss') hp += e.hp ?? 0
     else if (e.type === 'perfect_day') hp += e.hp ?? 0
-    else if (e.type === 'faint') hp = HP_FAINT_RESET
-    else if (e.type === 'level_up') hp = HP_MAX
+    // 'faint' and 'level_up' are inert. 'reset' is not represented in events.
 
-    while (xp >= xpForNextLevelAtLevel(level)) {
-      level++
-      hp = HP_MAX
-      levelUpEvents.push({ level, ts: e.ts + 0.001 })
+    // Detect level-ups: compare level before and after this event's XP change.
+    // Multi-level jumps are possible (big XP grant) — push each level gained.
+    const nowLevel = levelFromXp(xp)
+    if (nowLevel > prevLevel) {
+      for (let L = prevLevel + 1; L <= nowLevel; L++) {
+        levelsReached.push(L)
+        hp = HP_MAX // full heal on each level gained
+      }
+      prevLevel = nowLevel
     }
 
+    // Faint: HP hit 0 during this event's HP change. Reset to 50, count it.
     if (hp <= 0) {
-      hp = 0
-      faintEvents.push({ ts: e.ts + 0.001 })
       hp = HP_FAINT_RESET
+      faintCount++
     }
 
     if (hp > HP_MAX) hp = HP_MAX
   }
 
-  return { xp, hp, level, levelUpEvents, faintEvents }
+  return {
+    xp,
+    hp,
+    level: levelFromXp(xp),
+    faintCount,
+    levelsReached,
+  }
 }
 
 // ---------------------------------------------------------------------------
-// reconcile() — pure. Returns { state, appended }.
+// reconcile() — pure. Appends `miss` and `perfect_day` events for past days.
+// Does NOT append level_up or faint events; those are derived, not stored.
+// Returns { state, appended }.
 // ---------------------------------------------------------------------------
 
 function reconcile(state) {
@@ -129,33 +155,6 @@ function reconcile(state) {
       ts: dateToTs(day, 23),
     })
     existing.add(key)
-  }
-
-  const combined = [...state.events, ...appended]
-  const { levelUpEvents, faintEvents } = walk(combined)
-
-  const existingLevelUps = combined.filter((e) => e.type === 'level_up').length
-  const existingFaints = combined.filter((e) => e.type === 'faint').length
-
-  const newLevelUps = levelUpEvents.slice(existingLevelUps)
-  const newFaints = faintEvents.slice(existingFaints)
-
-  for (const lu of newLevelUps) {
-    appended.push({
-      id: newId(),
-      type: 'level_up',
-      date: today,
-      level: lu.level,
-      ts: Date.now(),
-    })
-  }
-  for (const _f of newFaints) {
-    appended.push({
-      id: newId(),
-      type: 'faint',
-      date: today,
-      ts: Date.now(),
-    })
   }
 
   if (appended.length === 0) return { state, appended: [] }
@@ -213,16 +212,10 @@ function deriveHeatmap(state) {
   const from = addDays(today, -(HEATMAP_DAYS - 1))
   const days = dateRange(from, addDays(today, 1))
 
-  // Map habitId -> habit so completions can be filtered by whether the
-  // habit was scheduled on the completion date.
   const habitById = new Map(state.habits.map((h) => [h.id, h]))
 
-  // completedByDate: date -> Set of habitIds completed that date.
-  // Using a Set dedupes in case duplicate complete events exist (defensive).
-  // Only counting completions of habits scheduled on that date keeps the
-  // numerator consistent with `scheduled` below — a habit archived after
-  // completion stops counting, and its past completions still count for the
-  // days it was scheduled.
+  // date -> Set of habitIds completed that date. Only counts completions of
+  // habits that were scheduled on that date. Dedupes by using a Set.
   const completedByDate = new Map()
   for (const e of state.events) {
     if (e.type !== 'complete' || !e.date || e.refType !== 'habit') continue
@@ -250,15 +243,6 @@ function deriveHeatmap(state) {
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
-//
-// Celebration policy (simplified in M4.5):
-//   - Only events appended DURING THE LIVE SESSION trigger the overlay/modal.
-//   - Reconciliation on mount is catch-up. If it appends 300 misses and a
-//     faint, that's history, not a moment. The visible signal is HP = 50 and
-//     a heatmap full of misses. No modal.
-//
-// This is deliberate. It's also StrictMode-safe: no reliance on the initial
-// useState value surviving React's dev-mode double-mount.
 
 export function useQuestLog() {
   const [state, setState] = useState(() => {
@@ -268,20 +252,36 @@ export function useQuestLog() {
   })
 
   const [pendingCelebration, setPendingCelebration] = useState(null)
-  const lastEventCountRef = useRef(state.events.length)
+
+  // Track derived (level, faintCount). Initialized from the FIRST derived
+  // state so mount never counts as an increase. This is the StrictMode-safe
+  // pattern: no reliance on useState initializer surviving a remount.
+  const lastDerivedRef = useRef(null)
 
   useEffect(() => {
     saveState(state)
   }, [state])
 
   useEffect(() => {
-    const prevCount = lastEventCountRef.current
-    const newEvents = state.events.slice(prevCount)
-    const levelUp = newEvents.find((e) => e.type === 'level_up')
-    const faint = newEvents.find((e) => e.type === 'faint')
-    if (levelUp) setPendingCelebration({ kind: 'level_up', event: levelUp })
-    else if (faint) setPendingCelebration({ kind: 'faint', event: faint })
-    lastEventCountRef.current = state.events.length
+    const { level, faintCount } = walk(state.events)
+
+    if (lastDerivedRef.current === null) {
+      // First effect run after mount. Baseline, don't celebrate.
+      lastDerivedRef.current = { level, faintCount }
+      return
+    }
+
+    const prev = lastDerivedRef.current
+    const levelIncreased = level > prev.level
+    const faintIncreased = faintCount > prev.faintCount
+
+    if (levelIncreased) {
+      setPendingCelebration({ kind: 'level_up', level })
+    } else if (faintIncreased) {
+      setPendingCelebration({ kind: 'faint' })
+    }
+
+    lastDerivedRef.current = { level, faintCount }
   }, [state.events])
 
   const clearCelebration = useCallback(() => setPendingCelebration(null), [])
@@ -497,8 +497,13 @@ export function useQuestLog() {
     saveState(fresh)
     const { state: reconciled } = reconcile(fresh)
     setState(reconciled)
-    lastEventCountRef.current = reconciled.events.length
     setPendingCelebration(null)
+
+    // Reset the derived-state ref so the next mount baseline is fresh, and
+    // so the effect after this state change doesn't read the reset as a
+    // level or faint change.
+    const { level, faintCount } = walk(reconciled.events)
+    lastDerivedRef.current = { level, faintCount }
   }, [])
 
   // ---- derived -------------------------------------------------------------

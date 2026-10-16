@@ -5,12 +5,6 @@ levels up your character, and unlocks rewards. Missed scheduled days cost HP,
 so streaks feel meaningful.
 
 Built by [Edriane Mina](https://github.com/MISiane).
-
-## Status
-
-v1 — feature-complete, QA-verified, frontend-only. See `PROJECT_STATE.md` for
-invariants, gotchas, and milestone history.
-
 ## What it does
 
 - **Quests** — habits with a schedule (daily or specific weekdays) and a

@@ -131,7 +131,7 @@ export default function App() {
         </div>
 
         <footer className="mt-10 text-center text-[10px] text-text-dim">
-          Milestone 4 · celebration + polish · v0.4
+         - questlog v1 -
         </footer>
       </main>
 
@@ -159,11 +159,11 @@ export default function App() {
       />
 
       {celebrationKind === 'level_up' && (
-        <LevelUpOverlay
-          level={pendingCelebration.event.level}
-          onDismiss={clearCelebration}
-        />
-      )}
+  <LevelUpOverlay
+    level={pendingCelebration.level}
+    onDismiss={clearCelebration}
+  />
+)}
 
       {celebrationKind === 'faint' && (
         <FaintModal open onClose={clearCelebration} />
