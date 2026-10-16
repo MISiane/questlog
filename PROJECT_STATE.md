@@ -3,7 +3,7 @@
 
 # PROJECT_STATE.md
 
-_Last updated: Milestone 6 complete. QuestLog v1 is deployed._
+_Last updated: Milestone 7.2 complete. Bug 1 (level math) and Bug 3 (faint reset) fixed. Bug 4 (re-crossing) verified. Bug 2 (schedule history) pending in M7.3._
 
 ## What this is
 
@@ -29,12 +29,12 @@ _Last updated: Milestone 6 complete. QuestLog v1 is deployed._
 4. **Do not restructure `client/src/`.** Keep `components/`, `hooks/`, `services/`, `utils/`, `assets/`.
 5. **Dates are `YYYY-MM-DD` strings** in browser local time. "Today" is re-read on every render/mutation; no midnight timer.
 6. **All XP / HP / streak / heatmap / level state is derived from an append-only `events` log.** Never mutate `character.xp` or `character.hp` directly.
-7. **The HP/XP walk lives in exactly one function: `walk()` in `useQuestLog.js`.** Both `reconcile()` and `deriveCharacter()` call it. Do not duplicate.
+7. **The HP/XP walk lives in exactly one function: walk() in useQuestLog.js. deriveCharacter() and the celebration effect both call it. reconcile() does not call it and does not emit level_up or faint events. Do not duplicate the walk.
 8. **Today is excluded from `reconcile()`.** Today's `perfect_day` is handled inside `toggleHabitToday`.
 9. **Deleting a habit/todo archives it** (`archivedAt`), never hard-removes.
 10. **When fixing anything touching more than a trivial constant, send the full file, not a diff.**
 11. **Test snippets must derive dates relative to `new Date()`.** Never hardcode a date.
-12. **The celebration model is deliberately live-session-only.** Reconciliation appends do not produce overlays. Do not re-litigate.
+12. **The celebration model is diff-based and live-session-only. The hook tracks (level, faintCount) from walk() in a ref, initialized from the first derived state. It celebrates when either increases. level_up and faint events are no longer written; old ones in the log are inert. Reconciliation appends do not produce overlays. Do not re-litigate.
 13. **`truncate` needs `min-w-0` on every flex ancestor.** See `QuestItem.jsx` and `TodoItem.jsx`.
 14. **The heatmap's `completed` count must only include completions of habits scheduled on that date, deduped.** Do not count to-dos. Do not count completions of habits archived before that date.
 
@@ -112,6 +112,8 @@ quest-log/
 - [x] **M5** — Manual QA. Fixed B5 (flex min-w-0), F1 (heatmap over-count), J5 (QuestList hid "not today").
 - [x] **M5.5** — Git + GitHub. Repo live, project moved to `C:\dev\quest-log`.
 - [x] **M6** — Vercel deploy. Favicon replaced, live URL, auto-deploy on push.
+- [x] **M7.1** — Fixed `walk()` level math (was comparing total XP against `100 * level`, produced level spam and premature full heals). Fixed faint reset overwriting post-faint HP (saved `faint` events no longer reset HP; the `hp <= 0` branch does). `walk()` now derives `level` from `levelFromXp(xp)` — same source as the XP bar. `reconcile()` no longer emits `level_up` or `faint` events.
+- [x] **M7.2** — Verified re-crossing a level after undo celebrates. Diff-based celebration (`level`, `faintCount`) replaces event-count-based. No code changes; M7.1 already contained the fix.
 
 ## Known issues / accepted quirks
 
