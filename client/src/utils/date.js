@@ -40,9 +40,3 @@ export function dateRange(from, to) {
   }
   return out
 }
-
-export function daysBetween(from, to) {
-  const a = strToDate(from).getTime()
-  const b = strToDate(to).getTime()
-  return Math.round((b - a) / 86400000)
-}

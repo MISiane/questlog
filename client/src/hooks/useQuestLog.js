@@ -297,7 +297,6 @@ export function useQuestLog() {
         habits: s.habits.map((h) => {
           if (h.id !== id) return h
 
-          // Non-schedule fields go on first.
           const { schedule: patchSchedule, ...rest } = patch
           let next = { ...h, ...rest }
 
@@ -340,7 +339,10 @@ export function useQuestLog() {
 
         const hasComplete = s.events.some(
           (e) =>
-            e.type === 'complete' && e.refId === id && e.date === today
+            e.type === 'complete' &&
+            e.refType === 'habit' &&
+            e.refId === id &&
+            e.date === today
         )
 
         if (hasComplete) {
@@ -350,6 +352,7 @@ export function useQuestLog() {
               (e) =>
                 !(
                   e.type === 'complete' &&
+                  e.refType === 'habit' &&
                   e.refId === id &&
                   e.date === today
                 ) && !(e.type === 'perfect_day' && e.date === today)
@@ -376,7 +379,12 @@ export function useQuestLog() {
         )
         const completedToday = new Set(
           withComplete
-            .filter((e) => e.type === 'complete' && e.date === today)
+            .filter(
+              (e) =>
+                e.type === 'complete' &&
+                e.refType === 'habit' &&
+                e.date === today
+            )
             .map((e) => e.refId)
         )
         const allDone =
@@ -507,10 +515,6 @@ export function useQuestLog() {
       state.habits
         .filter((h) => !h.archivedAt)
         .map((h) => {
-          // Expose the schedule effective TODAY as `schedule` for the UI
-          // (HabitForm edit reads it). The raw `schedule` mirror may be
-          // stale relative to today if history has entries after it, but
-          // scheduleOn() picks the right one.
           const currentDays = normalizeDays(scheduleOn(h, todayStr()) ?? [])
           return {
             ...h,
@@ -520,6 +524,7 @@ export function useQuestLog() {
             completedToday: state.events.some(
               (e) =>
                 e.type === 'complete' &&
+                e.refType === 'habit' &&
                 e.refId === h.id &&
                 e.date === todayStr()
             ),
@@ -553,4 +558,4 @@ export function useQuestLog() {
     renameCharacter,
     resetAll,
   }
-}   
+}

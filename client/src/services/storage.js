@@ -16,8 +16,7 @@ export const SCHEMA_VERSION = 1
 // ---------------------------------------------------------------------------
 
 // Normalize a list of weekday numbers. Numeric sort (the default .sort()
-// is lexicographic: [10, 2] sorts as [10, 2], and even for 0..6 the wrong
-// comparator is a footgun).
+// is lexicographic).
 export function normalizeDays(days) {
   if (!Array.isArray(days)) return []
   const unique = new Set()
@@ -55,14 +54,17 @@ export function scheduleOn(habit, dateStr) {
 // `fromDate` is the date the change takes effect. If an entry already exists
 // for that date, its days are replaced (not duplicated).
 //
-// Returns a new habit object; does not mutate the input.
+// Returns a new habit object. If `days` normalizes to empty, returns the
+// habit unchanged — empty schedules are not supported (matches
+// isValidScheduleHistoryEntry, which rejects empty days).
 export function setSchedule(habit, fromDate, days) {
   const normalized = normalizeDays(days)
+  if (normalized.length === 0) return habit
+
   const existing = Array.isArray(habit.scheduleHistory)
     ? habit.scheduleHistory
     : []
 
-  // Find an entry with from === fromDate.
   let replaced = false
   const next = existing.map((entry) => {
     if (entry && entry.from === fromDate) {
@@ -74,8 +76,6 @@ export function setSchedule(habit, fromDate, days) {
 
   if (!replaced) next.push({ from: fromDate, days: normalized })
 
-  // Keep history sorted by `from` ascending. Sorting here means lookups
-  // never have to assume order, but it also makes debugging easier.
   next.sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0))
 
   return {
@@ -157,8 +157,6 @@ function isValidHabit(h) {
   }
   if (h.scheduleHistory !== undefined) {
     if (!Array.isArray(h.scheduleHistory)) return false
-    // Either empty (a habit whose history was cleared, will fall back to
-    // flat schedule) or every entry is well-formed.
     for (const e of h.scheduleHistory) {
       if (!isValidScheduleHistoryEntry(e)) return false
     }
@@ -176,13 +174,42 @@ function isValidTodo(t) {
   )
 }
 
+// Per-type event validation. Anything malformed here goes to backup + reseed
+// rather than silently polluting walk().
 function isValidEvent(e) {
-  return (
-    e &&
-    typeof e === 'object' &&
-    typeof e.id === 'string' &&
-    typeof e.type === 'string'
-  )
+  if (!e || typeof e !== 'object') return false
+  if (typeof e.id !== 'string') return false
+  if (typeof e.type !== 'string') return false
+
+  switch (e.type) {
+    case 'complete':
+      return (
+        (e.refType === 'habit' || e.refType === 'todo') &&
+        typeof e.refId === 'string' &&
+        typeof e.date === 'string' &&
+        Number.isFinite(e.xp)
+      )
+    case 'miss':
+      return (
+        e.refType === 'habit' &&
+        typeof e.refId === 'string' &&
+        typeof e.date === 'string' &&
+        Number.isFinite(e.hp)
+      )
+    case 'perfect_day':
+      return typeof e.date === 'string' && Number.isFinite(e.hp)
+    // Legacy event types. The app no longer writes these, but old logs may
+    // contain them. walk() ignores them; here we only check they're shaped
+    // well enough not to crash anything reading them.
+    case 'level_up':
+      return typeof e.date === 'string' && Number.isFinite(e.level)
+    case 'faint':
+      return typeof e.date === 'string'
+    case 'reset':
+      return true
+    default:
+      return false
+  }
 }
 
 function isValidState(s) {
@@ -205,20 +232,23 @@ function isValidState(s) {
 // ---------------------------------------------------------------------------
 // Migration
 // ---------------------------------------------------------------------------
-// Wraps pre-M7.3 habits (flat `schedule`, no `scheduleHistory`) into the new
-// shape. Purely additive: keeps `schedule` as a mirror, adds `scheduleHistory`
-// with one entry `{ from: habit.createdAt, days: habit.schedule }`.
+// Wraps pre-M7.3 habits into the history shape. Purely additive: keeps
+// `schedule` as a mirror, adds `scheduleHistory` with one entry.
 //
-// Idempotent: running it on an already-migrated state is a no-op.
+// Idempotent. Returns { state, changed } — `changed` is true only if a habit
+// was actually modified. This is what `loadState` uses to decide whether to
+// persist, instead of a reference comparison (which was always true because
+// map() creates a new object every call).
 //
-// Throws if a habit is malformed in a way we can't recover from. The caller
-// routes that to backup + reseed.
+// Throws if a habit is malformed beyond recovery. The caller routes that to
+// backup + reseed.
 
 function migrate(state) {
-  if (!state || typeof state !== 'object') return state
-  if (!Array.isArray(state.habits)) return state
+  if (!state || typeof state !== 'object') return { state, changed: false }
+  if (!Array.isArray(state.habits)) return { state, changed: false }
 
   const today = todayStr()
+  let changed = false
 
   const habits = state.habits.map((h) => {
     if (!h || typeof h !== 'object') {
@@ -229,20 +259,42 @@ function migrate(state) {
       Array.isArray(h.scheduleHistory) && h.scheduleHistory.length > 0
 
     if (hasHistory) {
-      // Already migrated (or created post-M7.3). Ensure the mirror exists
-      // and matches the latest history entry. Don't touch history.
-      const days = scheduleOn(h, today) ?? normalizeDays(h.schedule ?? [])
+      // Already migrated. Verify the mirror exists and matches the latest
+      // history entry. If it already matches, return the habit unchanged so
+      // `changed` stays false.
+      const effective = scheduleOn(h, today) ?? normalizeDays(h.schedule ?? [])
+      const normalizedEffective = normalizeDays(effective)
+      const normalizedHistory = h.scheduleHistory.map((e) => ({
+        from: e.from,
+        days: normalizeDays(e.days),
+      }))
+
+      const mirrorMatches =
+        Array.isArray(h.schedule) &&
+        h.schedule.length === normalizedEffective.length &&
+        h.schedule.every((d, i) => d === normalizedEffective[i])
+
+      const historyAlreadyNormalized = h.scheduleHistory.every(
+        (e, i) =>
+          e.from === normalizedHistory[i].from &&
+          Array.isArray(e.days) &&
+          e.days.length === normalizedHistory[i].days.length &&
+          e.days.every((d, j) => d === normalizedHistory[i].days[j])
+      )
+
+      if (mirrorMatches && historyAlreadyNormalized) {
+        return h // unchanged
+      }
+
+      changed = true
       return {
         ...h,
-        schedule: normalizeDays(days),
-        scheduleHistory: h.scheduleHistory.map((e) => ({
-          from: e.from,
-          days: normalizeDays(e.days),
-        })),
+        schedule: normalizedEffective,
+        scheduleHistory: normalizedHistory,
       }
     }
 
-    // Pre-M7.3: has flat schedule only. Wrap it.
+    // Pre-M7.3: flat schedule only. Wrap it.
     if (!Array.isArray(h.schedule)) {
       throw new Error('migrate: habit has no usable schedule')
     }
@@ -250,6 +302,7 @@ function migrate(state) {
       throw new Error('migrate: habit missing createdAt')
     }
 
+    changed = true
     const days = normalizeDays(h.schedule)
     return {
       ...h,
@@ -258,21 +311,22 @@ function migrate(state) {
     }
   })
 
-  return { ...state, habits }
+  if (!changed) return { state, changed: false }
+  return { state: { ...state, habits }, changed: true }
 }
 
 // ---------------------------------------------------------------------------
 // Load / save / reset
 // ---------------------------------------------------------------------------
 
-// Write to a backup key, swallowing any storage error. A quota error here
-// must not crash startup.
 function writeBackup(key, raw) {
   if (typeof raw !== 'string') return
   try {
     localStorage.setItem(key, raw)
-  } catch {
-    // ignore
+  } catch (err) {
+    // A quota or disabled-storage error here means the backup didn't happen.
+    // Log so it's visible in devtools; the app still reseeds.
+    console.warn(`[QuestLog] backup to "${key}" failed:`, err)
   }
 }
 
@@ -281,12 +335,10 @@ export function loadState() {
   try {
     raw = localStorage.getItem(STORAGE_KEY)
   } catch {
-    // Storage disabled. Nothing to back up. Seed fresh.
     return { state: seedState(), seeded: true }
   }
 
   if (!raw) {
-    // First run. Seed without touching backups.
     const seeded = seedState()
     saveState(seeded)
     return { state: seeded, seeded: true }
@@ -296,7 +348,6 @@ export function loadState() {
   try {
     parsed = JSON.parse(raw)
   } catch {
-    // Corrupt JSON. Back up and reseed.
     writeBackup(BACKUP_KEY, raw)
     const seeded = seedState()
     saveState(seeded)
@@ -304,14 +355,12 @@ export function loadState() {
   }
 
   // Before the FIRST migration of a pre-M7.3 save, make a rollback copy.
-  // This never overwrites an existing pre-m73 backup (we only write if
-  // the key is absent), so a bad second migration can't clobber a good
-  // first one.
+  // Never overwrites an existing pre-m73 backup.
   const hasPreM73Backup = (() => {
     try {
       return localStorage.getItem(PRE_M73_KEY) !== null
     } catch {
-      return true // if we can't read, don't try to write
+      return true // can't read → don't try to write
     }
   })()
   const looksLikePreM73 =
@@ -326,28 +375,25 @@ export function loadState() {
   try {
     migrated = migrate(parsed)
   } catch {
-    // Migration failed on a habit we can't recover. Back up, reseed.
     writeBackup(BACKUP_KEY, raw)
     const seeded = seedState()
     saveState(seeded)
     return { state: seeded, seeded: true }
   }
 
-  if (!isValidState(migrated)) {
+  if (!isValidState(migrated.state)) {
     writeBackup(BACKUP_KEY, raw)
     const seeded = seedState()
     saveState(seeded)
     return { state: seeded, seeded: true }
   }
 
-  // If migration changed anything, persist the migrated shape immediately so
-  // the next load reads a post-M7.3 save.
-  const wasMigrated = migrated !== parsed
-  if (wasMigrated) {
-    saveState(migrated)
+  // Persist only if migration actually changed something.
+  if (migrated.changed) {
+    saveState(migrated.state)
   }
 
-  return { state: migrated, seeded: false }
+  return { state: migrated.state, seeded: false }
 }
 
 export function saveState(state) {

@@ -3,7 +3,7 @@
 
 # PROJECT_STATE.md
 
-_Last updated: Milestone 7.3 complete. All four bugs from continued-use testing fixed. Live at https://github.com/MISiane/questlog_
+_Last updated: Milestone 7.4 complete. Code review fixes: migration churn, event validation, refType matching._
 
 ## What this is
 
@@ -131,6 +131,14 @@ quest-log/
 - [x] **M7.1** — Fixed level math in `walk()` and faint reset overwriting post-faint HP.
 - [x] **M7.2** — Verified re-crossing a level celebrates. Diff-based celebration replaces event-count-based.
 - [x] **M7.3** — Schedule history. Fixed retroactive misses from schedule edits.
+- [x] **M7.4** — Code review fixes. `migrate()` now returns `{ state, changed }`
+      so `loadState` only persists when a habit was actually modified (was
+      rewriting the save on every load). `isValidEvent` validates per-type
+      fields instead of just `id` and `type`. `setSchedule` rejects empty
+      `days`. `toggleHabitToday` matches `refType: 'habit'` for consistency
+      with the rest of the code. `daysBetween` removed (unused). Intentional
+      asymmetries (perfect-day, undo-vs-delete XP, celebration ordering,
+      silent reseed) documented in Known issues.
 
 ## Known issues / accepted quirks
 
@@ -145,6 +153,29 @@ quest-log/
 - **Repo lives at `C:\dev\quest-log`, not OneDrive.** Don't move it back.
 - **localStorage is per-origin.** `localhost:5173` and the Vercel URL have separate stores.
 - **Phantom misses from pre-M7.3 schedule edits may remain in existing logs.** Indistinguishable from real misses. New ones can't occur after M7.3. A reset clears them.
+- **Perfect-day asymmetry (intentional).** Historical reconciliation awards
+  +5 HP for a day with zero scheduled habits (a rest day counts). Today's
+  completion path only awards it when at least one habit is scheduled and all
+  are done. Reason: "today is perfect" is only knowable once today ends, and
+  we can't retract the +5 if the user adds a habit later in the day. The
+  moment-of-completion bonus requires at least one completion to fire.
+- **Undo reverses XP; delete does not (intentional).** Unchecking a completed
+  habit or to-do removes the `complete` event, which reverses the XP because
+  XP is derived. Deleting preserves history and never refunds. The rule "XP
+  is permanent once earned" applies to deletion, not to undoing the action
+  that earned it. The UI language reflects this: the button says "undo" on a
+  completed item, not "delete."
+- **Level-up wins over faint in the same state change (intentional).** If a
+  single reconcile produces both a level-up and a faint, only the level-up
+  celebration fires. Reason: by timestamp ordering, the faint happens first
+  (misses are dated mid-day), then the level-up heals to full. The level-up
+  is the state the player actually sees. A faint modal would describe a state
+  that no longer exists.
+- **Silent reseed on corrupt save (intentional for a personal v1).** When
+  validation fails, the raw save is copied to `questlog.v1.backup`, a
+  console.warn is logged if the backup write itself fails, and the app
+  reseeds. There is no UI for recovery. If backups become a repeated need,
+  add a "download backup" or "restore from backup" button in Settings.
 
 ## Out of scope for v1
 
