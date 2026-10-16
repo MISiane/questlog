@@ -3,8 +3,10 @@ import {
   loadState,
   saveState,
   resetState,
-  emptyState,
   seedState,
+  scheduleOn,
+  setSchedule,
+  normalizeDays,
 } from '../services/storage'
 import { newId } from '../utils/id'
 import { todayStr, dayOfWeek, addDays, dateRange } from '../utils/date'
@@ -28,7 +30,9 @@ const HEATMAP_DAYS = 140
 function isHabitScheduledOn(habit, dateStr) {
   if (habit.archivedAt && dateStr >= habit.archivedAt) return false
   if (dateStr < habit.createdAt) return false
-  return habit.schedule.includes(dayOfWeek(dateStr))
+  const days = scheduleOn(habit, dateStr)
+  if (!Array.isArray(days) || days.length === 0) return false
+  return days.includes(dayOfWeek(dateStr))
 }
 
 function completedDatesFor(habitId, events) {
@@ -40,21 +44,7 @@ function completedDatesFor(habitId, events) {
 }
 
 // ---------------------------------------------------------------------------
-// walk() — the single source of truth for XP, HP, level, and faint count.
-//
-// Derives everything from the raw event log. Ignores saved `level_up` and
-// `faint` events entirely: those are inert historical markers written by an
-// earlier version of the app. Level is derived from XP via levelFromXp(),
-// which is the same function xp.js uses to render the XP bar. One source of
-// truth, no possibility of drift.
-//
-// Returns:
-//   xp            — total XP earned
-//   hp            — current HP (0..HP_MAX)
-//   level         — derived from xp, matches the XP bar
-//   faintCount    — how many times HP hit 0 during the walk
-//   levelsReached — every level the walk passed through, in order
-//                   (informational; the hook diffs `level`, not this array)
+// walk()
 // ---------------------------------------------------------------------------
 
 function walk(events) {
@@ -65,28 +55,23 @@ function walk(events) {
   let faintCount = 0
   const levelsReached = []
 
-  // At the start, we're at level 1 with full HP. Record it so a fresh
-  // character doesn't spuriously count as reaching level 1.
   let prevLevel = levelFromXp(xp)
 
   for (const e of sorted) {
     if (e.type === 'complete') xp += e.xp ?? 0
     else if (e.type === 'miss') hp += e.hp ?? 0
     else if (e.type === 'perfect_day') hp += e.hp ?? 0
-    // 'faint' and 'level_up' are inert. 'reset' is not represented in events.
+    // 'faint' and 'level_up' are inert historical markers. Ignored.
 
-    // Detect level-ups: compare level before and after this event's XP change.
-    // Multi-level jumps are possible (big XP grant) — push each level gained.
     const nowLevel = levelFromXp(xp)
     if (nowLevel > prevLevel) {
       for (let L = prevLevel + 1; L <= nowLevel; L++) {
         levelsReached.push(L)
-        hp = HP_MAX // full heal on each level gained
+        hp = HP_MAX
       }
       prevLevel = nowLevel
     }
 
-    // Faint: HP hit 0 during this event's HP change. Reset to 50, count it.
     if (hp <= 0) {
       hp = HP_FAINT_RESET
       faintCount++
@@ -105,9 +90,7 @@ function walk(events) {
 }
 
 // ---------------------------------------------------------------------------
-// reconcile() — pure. Appends `miss` and `perfect_day` events for past days.
-// Does NOT append level_up or faint events; those are derived, not stored.
-// Returns { state, appended }.
+// reconcile()
 // ---------------------------------------------------------------------------
 
 function reconcile(state) {
@@ -214,8 +197,6 @@ function deriveHeatmap(state) {
 
   const habitById = new Map(state.habits.map((h) => [h.id, h]))
 
-  // date -> Set of habitIds completed that date. Only counts completions of
-  // habits that were scheduled on that date. Dedupes by using a Set.
   const completedByDate = new Map()
   for (const e of state.events) {
     if (e.type !== 'complete' || !e.date || e.refType !== 'habit') continue
@@ -252,10 +233,6 @@ export function useQuestLog() {
   })
 
   const [pendingCelebration, setPendingCelebration] = useState(null)
-
-  // Track derived (level, faintCount). Initialized from the FIRST derived
-  // state so mount never counts as an increase. This is the StrictMode-safe
-  // pattern: no reliance on useState initializer surviving a remount.
   const lastDerivedRef = useRef(null)
 
   useEffect(() => {
@@ -266,18 +243,14 @@ export function useQuestLog() {
     const { level, faintCount } = walk(state.events)
 
     if (lastDerivedRef.current === null) {
-      // First effect run after mount. Baseline, don't celebrate.
       lastDerivedRef.current = { level, faintCount }
       return
     }
 
     const prev = lastDerivedRef.current
-    const levelIncreased = level > prev.level
-    const faintIncreased = faintCount > prev.faintCount
-
-    if (levelIncreased) {
+    if (level > prev.level) {
       setPendingCelebration({ kind: 'level_up', level })
-    } else if (faintIncreased) {
+    } else if (faintCount > prev.faintCount) {
       setPendingCelebration({ kind: 'faint' })
     }
 
@@ -298,15 +271,18 @@ export function useQuestLog() {
 
   const addHabit = useCallback(
     ({ name, icon, difficulty, schedule }) => {
-      const habit = {
+      const today = todayStr()
+      const base = {
         id: newId(),
         name: name.trim(),
         icon: icon || '⭐',
         difficulty,
-        schedule: [...schedule].sort(),
-        createdAt: todayStr(),
+        createdAt: today,
         archivedAt: null,
+        scheduleHistory: [],
+        schedule: [],
       }
+      const habit = setSchedule(base, today, schedule)
       mutate((s) => ({ ...s, habits: [...s.habits, habit] }))
       return habit.id
     },
@@ -315,9 +291,29 @@ export function useQuestLog() {
 
   const editHabit = useCallback(
     (id, patch) => {
+      const today = todayStr()
       mutate((s) => ({
         ...s,
-        habits: s.habits.map((h) => (h.id === id ? { ...h, ...patch } : h)),
+        habits: s.habits.map((h) => {
+          if (h.id !== id) return h
+
+          // Non-schedule fields go on first.
+          const { schedule: patchSchedule, ...rest } = patch
+          let next = { ...h, ...rest }
+
+          if (patchSchedule !== undefined) {
+            const normalized = normalizeDays(patchSchedule)
+            const current = normalizeDays(scheduleOn(h, today) ?? [])
+            const same =
+              normalized.length === current.length &&
+              normalized.every((d, i) => d === current[i])
+            if (!same && normalized.length > 0) {
+              next = setSchedule(next, today, normalized)
+            }
+          }
+
+          return next
+        }),
       }))
     },
     [mutate]
@@ -498,10 +494,6 @@ export function useQuestLog() {
     const { state: reconciled } = reconcile(fresh)
     setState(reconciled)
     setPendingCelebration(null)
-
-    // Reset the derived-state ref so the next mount baseline is fresh, and
-    // so the effect after this state change doesn't read the reset as a
-    // level or faint change.
     const { level, faintCount } = walk(reconciled.events)
     lastDerivedRef.current = { level, faintCount }
   }, [])
@@ -514,17 +506,25 @@ export function useQuestLog() {
     () =>
       state.habits
         .filter((h) => !h.archivedAt)
-        .map((h) => ({
-          ...h,
-          streak: streakFor(h, state.events),
-          scheduledToday: isHabitScheduledOn(h, todayStr()),
-          completedToday: state.events.some(
-            (e) =>
-              e.type === 'complete' &&
-              e.refId === h.id &&
-              e.date === todayStr()
-          ),
-        })),
+        .map((h) => {
+          // Expose the schedule effective TODAY as `schedule` for the UI
+          // (HabitForm edit reads it). The raw `schedule` mirror may be
+          // stale relative to today if history has entries after it, but
+          // scheduleOn() picks the right one.
+          const currentDays = normalizeDays(scheduleOn(h, todayStr()) ?? [])
+          return {
+            ...h,
+            schedule: currentDays,
+            streak: streakFor(h, state.events),
+            scheduledToday: isHabitScheduledOn(h, todayStr()),
+            completedToday: state.events.some(
+              (e) =>
+                e.type === 'complete' &&
+                e.refId === h.id &&
+                e.date === todayStr()
+            ),
+          }
+        }),
     [state]
   )
 
@@ -553,4 +553,4 @@ export function useQuestLog() {
     renameCharacter,
     resetAll,
   }
-}
+}   

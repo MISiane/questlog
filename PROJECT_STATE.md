@@ -3,7 +3,7 @@
 
 # PROJECT_STATE.md
 
-_Last updated: Milestone 7.2 complete. Bug 1 (level math) and Bug 3 (faint reset) fixed. Bug 4 (re-crossing) verified. Bug 2 (schedule history) pending in M7.3._
+_Last updated: Milestone 7.3 complete. All four bugs from continued-use testing fixed._
 
 ## What this is
 
@@ -37,6 +37,22 @@ _Last updated: Milestone 7.2 complete. Bug 1 (level math) and Bug 3 (faint reset
 12. **The celebration model is diff-based and live-session-only. The hook tracks (level, faintCount) from walk() in a ref, initialized from the first derived state. It celebrates when either increases. level_up and faint events are no longer written; old ones in the log are inert. Reconciliation appends do not produce overlays. Do not re-litigate.
 13. **`truncate` needs `min-w-0` on every flex ancestor.** See `QuestItem.jsx` and `TodoItem.jsx`.
 14. **The heatmap's `completed` count must only include completions of habits scheduled on that date, deduped.** Do not count to-dos. Do not count completions of habits archived before that date.
+15. **Habits have time-scoped schedules.** A habit's schedule is stored as
+    `scheduleHistory: [{ from: 'YYYY-MM-DD', days: [0..6] }]`. `isHabitScheduledOn`
+    picks the latest entry with `from <= date`. The flat `schedule` field is a
+    **mirror** — written alongside history, kept for rollback safety, never read
+    for logic (except as a fallback when history is missing). Do not add logic
+    that reads `habit.schedule` directly.
+16. **Editing a schedule appends an entry dated today; it never rewrites the past.**
+    Two edits on the same day replace that day's entry rather than stacking. A
+    schedule change today does not retroactively create misses for days the
+    habit wasn't scheduled under the old schedule. This was bug 2 from
+    continued-use testing, fixed in M7.3.
+17. **`loadState` migrates before validating, and backs up before reseeding.**
+    `version` stays at 1 across migrations — bumping it would fail `isValidState`
+    and silently reseed, wiping data. Migrate by shape. The `pre-m73` backup key
+    is written at most once, on the first migration of a pre-M7.3 save. The
+    `backup` key is written when validation fails after migration. B
 
 ## Game rules (locked)
 
@@ -114,6 +130,14 @@ quest-log/
 - [x] **M6** — Vercel deploy. Favicon replaced, live URL, auto-deploy on push.
 - [x] **M7.1** — Fixed `walk()` level math (was comparing total XP against `100 * level`, produced level spam and premature full heals). Fixed faint reset overwriting post-faint HP (saved `faint` events no longer reset HP; the `hp <= 0` branch does). `walk()` now derives `level` from `levelFromXp(xp)` — same source as the XP bar. `reconcile()` no longer emits `level_up` or `faint` events.
 - [x] **M7.2** — Verified re-crossing a level after undo celebrates. Diff-based celebration (`level`, `faintCount`) replaces event-count-based. No code changes; M7.1 already contained the fix.
+- [x] **M7.3** — Schedule history. Fixed bug 2 from continued-use testing (editing a
+      schedule retroactively rewrote past misses and dropped HP). Habits now store
+      `scheduleHistory: [{ from, days }]`; `isHabitScheduledOn` looks up the
+      applicable entry. Flat `schedule` kept as a rollback-safe mirror. Migration
+      wraps pre-M7.3 saves and writes a `questlog.v1.pre-m73` backup. `seedState`
+      and `resetAll` updated to produce the new shape. Same-day edits replace,
+      cross-day edits append. Accepted limitation: phantom misses written by
+      pre-M7.3 retroactive edits remain in existing logs.
 
 ## Known issues / accepted quirks
 
@@ -127,6 +151,16 @@ quest-log/
 - **No LICENSE file.** All rights reserved by default. Add MIT if it should be open-source.
 - **Repo lives at `C:\dev\quest-log`, not OneDrive.** Don't move it back.
 - **localStorage is per-origin.** `localhost:5173` and the Vercel URL have separate stores.
+- **Phantom misses from pre-M7.3 schedule edits may remain in existing logs.**
+  A `miss` event written when a schedule edit retroactively scheduled a habit on
+  an unscheduled past day looks identical to a real miss. There is no clean way
+  to distinguish them after the fact. New retroactive misses cannot occur after
+  M7.3. If you see HP lower than you expect on a migrated save, this is the
+  likely cause; a reset clears it.
+- **`localStorage` backups** — `questlog.v1.pre-m73` (first migration only) and
+  `questlog.v1.backup` (on validation failure). To restore from a backup:
+  `localStorage.setItem('questlog.v1', localStorage.getItem('questlog.v1.backup'))` then reload.
+  There is no UI for this. If it's ever needed more than once, add one.
 
 ## What's next (not scheduled)
 
@@ -141,7 +175,7 @@ Everything in the brief's Must-have list is done and shipped. If you come back t
 
 None of these are required for v1. v1 is done.
 
-## v1 status: shipped
+## v1 status: shipped, then patched to v1.3
 
 Every Must-have from the brief is implemented, QA-verified, committed, and deployed:
 
@@ -156,5 +190,22 @@ Every Must-have from the brief is implemented, QA-verified, committed, and deplo
 - [x] Live on Vercel
 - [x] Source on GitHub
 
+Post-deploy, continued daily use surfaced four bugs. All four are fixed:
+
+1. **Levels ran ahead of the XP curve.** `walk()` compared total XP against
+   `100 * level`, producing level spam and premature full heals. `walk()` now
+   derives level via `levelFromXp(xp)` — the same function the XP bar uses.
+2. **Editing a habit's schedule rewrote the past.** Fixed in M7.3 with
+   time-scoped `scheduleHistory`.
+3. **HP wrong after a long absence with a faint.** Saved `faint` events reset
+   HP to 50 at the end of the walk, overwriting the correct post-faint value.
+   `walk()` now ignores saved `faint` events; the `hp <= 0` branch handles the
+   reset at the correct point.
+4. **Re-crossing a level after un-check didn't celebrate.** Celebration now
+   diffs derived `(level, faintCount)` across state changes instead of
+   counting new events in the log.
+
+Both the celebration model and the schedule model are documented in the Hard
+rules above. Do not re-litigate either.
 ---
 
